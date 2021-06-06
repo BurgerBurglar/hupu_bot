@@ -1,43 +1,53 @@
+from collections import OrderedDict
+from datetime import datetime, timedelta
+import json
 import re
-from typing import List, Optional
+from typing import List, Optional, Dict, Tuple, Union
 import bs4
 from bs4 import BeautifulSoup
 import requests
-from requests.adapters import HTTPAdapter
+from fake_useragent import UserAgent
 from requests.sessions import session
 from urllib3.util.retry import Retry
-from datetime import datetime, timedelta
 from pytz import timezone
 from multiprocessing import Pool
-import json
 
 
 class ReadPost:
-    bbs_pages_to_read = 10
     website_url = "http://bbs.hupu.com"
-    subs = ["lol", "5032"]  # LOL游戏专区
+    subs = {
+        # "lol": "3441",
+        # "5032": "5032",  # LOL游戏专区
+        "realmadrid": "2543",
+    }
+    user_agent = UserAgent().random
 
     def __init__(
         self,
         queries: Optional[List[str]] = None,
+        sub_pages_to_read: int = 10,
         n_posts: Optional[int] = None,
         time_ago: Optional[timedelta] = None,
     ) -> None:
         self.queries = queries
         self.n_posts = n_posts
+        self.sub_pages_to_read = sub_pages_to_read
         if time_ago is None:
             self.min_time = None
         else:
             self.min_time = timezone("UTC").localize(datetime.utcnow()) - time_ago
+        with open("cookie.txt", encoding="utf-8") as f:
+            self.cookie = f.read().encode("utf-8")
         self.session = self._requests_retry_session()
         # use old version of hupu
-        self.session.get("https://bbs.hupu.com/api/v1/dest?id=1&type=CATEGORY")
+        self._try_catch_requests("https://bbs.hupu.com/api/v1/dest?id=1&type=CATEGORY")
 
     def _requests_retry_session(
+        self,
         retries=3,
         backoff_factor=0.3,
         status_forcelist=(500, 502, 504),
-    ):
+    ) -> requests.Session():
         session = requests.Session()
         retry = Retry(
             total=retries,
@@ -46,23 +56,40 @@ class ReadPost:
             backoff_factor=backoff_factor,
             status_forcelist=status_forcelist,
         )
-        adapter = HTTPAdapter(max_retries=retry)
+        adapter = requests.adapters.HTTPAdapter(max_retries=retry)
         session.mount("http://", adapter)
         session.mount("https://", adapter)
         return session
 
-    def get_posts_from_sub_page(self, sub_page_url: str) -> List:
+    def _try_catch_requests(self, url, *args):
         try:
-            html_text = self.session.get(sub_page_url, timeout=10).text
-            print("READING", sub_page_url)
-        except requests.exceptions.ConnectionError as e:
+            response = self.session.get(
+                url,
+                timeout=10,
+                headers={
+                    "user-agent": self.user_agent,
+                    "cookie": self.cookie,
+                },
+            )
+            return response
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
             print(e)
-            print(sub_page_url)
-            return []
-        except requests.exceptions.Timeout as e:
+            print(url)
+            return -1
+        except Exception as e:
+            print("UNCAUGHT ERROR!!!")
             print(e)
-            print(sub_page_url)
+            print(url)
+            return -1
+
+    def _filter_strings(self, input: str, *args) -> str:
+        return re.sub(rf"({'|'.join(args)})", "", input)
+
+    def get_posts_from_sub_page(self, sub_page_url: str, sub: str) -> Dict:
+        response = self._try_catch_requests(sub_page_url)
+        if response == -1:
             return []
+        html_text = response.text
 
         soup = BeautifulSoup(html_text.replace("&nbsp;", " "), "html.parser")
         posts = {}
@@ -100,109 +127,126 @@ class ReadPost:
                 post_id = post_anchor.get("href")[1:-5]
                 post_url = f"{self.website_url}/{post_id}.html"
                 post_title = post_anchor.get_text()
+                post_title = re.sub(r"\n", "", post_title)
+                pages = post.select_one("span.multipage")
+                n_pages = 1 if pages is None else int(pages.select("a")[-1].get_text())
                 posts[post_id] = {
+                    "sub": sub,
+                    "sub_id": self.subs[sub],
                     "post_url": post_url,
                     "post_title": post_title,
+                    "n_pages": n_pages,
                     "last_reply_time": last_reply_time.isoformat(),
                 }
         return posts
 
-    def get_all_posts(self) -> List:
-        sub_urls = {sub: f"{self.website_url}/{sub}" for sub in self.subs}
+    def get_all_posts(self) -> Dict:
+        sub_urls = {sub: f"{self.website_url}/{sub}" for sub in self.subs.keys()}
         sub_page_urls = {}
         for sub, sub_url in sub_urls.items():
             sub_page_urls[sub] = [
                 f"{sub_url}-{sub_page}"
-                for sub_page in range(1, self.bbs_pages_to_read + 1)
+                for sub_page in range(1, self.sub_pages_to_read + 1)
             ]
         posts = {}
         for sub, sub_page_url_list in sub_page_urls.items():
-            posts[sub] = sub
-            posts["posts"] = {}
-            for sub_page_url in sub_page_url_list:
-                posts["sub"] = {sub}
-                posts_from_sub_page = self.get_posts_from_sub_page(sub_page_url)
-                posts["posts"] = posts_from_sub_page
+            pool = Pool(processes=20)
+            arg_list = [(sub_page_url, sub) for sub_page_url in sub_page_url_list]
+            posts_from_sub_page_list = pool.starmap(
+                self.get_posts_from_sub_page, arg_list
+            )
+            for posts_from_sub_page in posts_from_sub_page_list:
+                posts |= posts_from_sub_page
         return posts
 
-    def get_floors(self, post_url: str) -> List:
-        page = 1
+    def get_floors_for_page(self, page_url: str) -> Tuple[Union[Dict, bool]]:
+        response = self._try_catch_requests(page_url)
+        if response == -1:
+            return [], True
+        html_text = response.text
+
         floor_contents = {}
-        n_pages = 1  # assumption. will update later.
-        while True:
-            if page > n_pages:
-                break
+        soup = BeautifulSoup(html_text.replace("&nbsp;", " "), "html.parser")
+        floors: bs4.element.ResultSet = soup.select("div.floor-show  ")
+        if not floors:
+            return [], True
+        else:
+            for floor in floors[::-1]:
+                floor_anchor: BeautifulSoup = floor.select_one(".floornum")
+                floor_num = int(floor_anchor.get("id"))
+                floor_id: str = floor_anchor.get("href").split("#")[1]
+                floor_url = f"{page_url}#{floor_id}"
+                floor_content: BeautifulSoup = floor.select_one("td")
+                if floor_num == 0:
+                    floor_content = floor_content.select_one(".quote-content")
+                quote = floor_content.select_one("blockquote")
+                if quote:
+                    quote.clear()
+                floor_content_text: str = floor_content.get_text()
+                strings_to_filter = [
+                    "发自虎扑.+客户端",
+                    "发自手机虎扑 m\.hupu\.com",
+                    "\n",
+                    "\r",
+                    "\\",
+                    "\u200b",
+                    "\xa0",
+                    "视频无法播放，浏览器版本过低，请升级浏览器或者使用其他浏览器",
+                    "\[ 此帖被.+修改 \]",
+                ]
+                floor_content_text = self._filter_strings(
+                    floor_content_text, *strings_to_filter
+                )
+                floor_time = datetime.strptime(
+                    floor.select_one(".stime").get_text(), "%Y-%m-%d %H:%M"
+                )
+                floor_time = timezone("Asia/Shanghai").localize(floor_time)
+
+                add_floor_query = False
+                if self.queries is None:
+                    add_floor_query = True
+                else:
+                    for query in self.queries:
+                        if query in floor_content_text.upper():
+                            add_floor_query = True
+                            break
+                add_floor_time = self.min_time is None or self.min_time < floor_time
+
+                if add_floor_query and add_floor_time:
+                    floor_username: str = floor.select_one(".j_u").get("uname")
+                    floor_contents[floor_num] = {
+                        "floor_id": floor_id,
+                        "floor_url": floor_url,
+                        "username": floor_username,
+                        "content": floor_content_text,
+                        "time": floor_time.isoformat(),
+                    }
+                elif not add_floor_time:
+                    break
+        read_previous_page = add_floor_time  # if False, don't read previous page
+        return floor_contents, read_previous_page
+
+    def get_floors_for_post(self, post_url: str, n_pages: int) -> Dict:
+        floor_contents = {}
+        for page in range(n_pages, 1, -1):
             page_url = post_url if page == 1 else post_url[:-5] + f"-{page}.html"
-            try:
-                html_text = self.session.get(page_url, timeout=10).text
-            except requests.exceptions.ConnectionError as e:
-                print(e)
-                print(page_url)
-                continue
-            except requests.exceptions.Timeout as e:
-                print(e)
-                print(page_url)
-                continue
-            print(page_url)
-
-            soup = BeautifulSoup(html_text.replace("&nbsp;", " "), "html.parser")
-            if page == 1:
-                # regex find number of pages in JavaScript
-                n_pages = int(re.findall(r"(?<=pageCount:)\b\w+\b", html_text)[0])
-
-            floors: bs4.element.ResultSet = soup.select("div.floor-show  ")
-            if floors:
-                for floor in floors:
-                    floor_num = int(floor.select_one(".floornum").get("id"))
-                    floor_content: BeautifulSoup = floor.select_one("td")
-                    if floor_num == 0:
-                        floor_content = floor_content.select_one(".quote-content")
-                    quote = floor_content.select_one("blockquote")
-                    if quote:
-                        quote.clear()
-                    floor_content_text: str = floor_content.get_text()
-                    floor_content_text = re.sub(
-                        r"(发自虎扑\w+客户端|发自手机虎扑 m.hupu.com|\n|\u200b|\xa0|视频无法播放，浏览器版本过低，请升级浏览器或者使用其他浏览器)",
-                        "",
-                        floor_content_text,
-                    )
-                    floor_time = datetime.strptime(
-                        floor.select_one(".stime").get_text(), "%Y-%m-%d %H:%M"
-                    )
-                    floor_time = timezone("Asia/Shanghai").localize(floor_time)
-
-                    add_floor_query = False
-                    if self.queries is None:
-                        add_floor_query = True
-                    else:
-                        for query in self.queries:
-                            if query in floor_content_text:
-                                add_floor_query = True
-                                break
-                    add_floor_time = self.min_time is None or self.min_time < floor_time
-
-                    if add_floor_query and add_floor_time:
-                        floor_username: str = floor.select_one(".j_u").get("uname")
-                        floor_contents[floor_num] = {
-                            "username": floor_username,
-                            "content": floor_content_text,
-                            "time": floor_time.isoformat(),
-                        }
-            else:  # empty page
+            floor_for_page, read_previous_page = self.get_floors_for_page(page_url)
+            floor_contents |= floor_for_page
+            if not read_previous_page:
                 break
-            page += 1
+        return OrderedDict(sorted(floor_contents.items()))
 
-        return floor_contents
-
-    def get_all_floors(self):
+    def get_all_floors(self) -> Dict:
         posts = self.get_all_posts()
-        print("got all posts")
         if self.n_posts is not None:
             posts = {k: posts[k] for k in list(posts)[: self.n_posts]}
         post_ids = list(posts.keys())
-        post_urls = [posts[post_id]["post_url"] for post_id in post_ids]
-        pool = Pool(processes=10)
-        floors_list = pool.map(self.get_floors, post_urls)
+        args = [
+            (posts[post_id]["post_url"], posts[post_id]["n_pages"])
+            for post_id in post_ids
+        ]
+        pool = Pool(processes=20)
+        floors_list = pool.starmap(self.get_floors_for_post, args)
         post_details = {}
         for i in range(len(post_ids)):
             post_id = post_ids[i]
@@ -222,10 +266,10 @@ if __name__ == "__main__":
     start_time = datetime.now()
     read_post = ReadPost(
         queries=[*champions.keys()],
-        n_posts=10,
-        time_ago=timedelta(days=1),
+        # n_posts=10,
+        time_ago=timedelta(hours=1),
     )
-    result = read_post.get_all_posts()
+    result = read_post.get_all_floors()
     print(result)
     print("Time:", datetime.now() - start_time)
 

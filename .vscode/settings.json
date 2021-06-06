@@ -1,6 +1,0 @@
-{
-    "python.linting.enabled": false,
-    "python.linting.pylintEnabled": true,
-    "python.formatting.provider": "black",
-    "python.pythonPath": "venv\\Scripts\\python.exe"
-}
