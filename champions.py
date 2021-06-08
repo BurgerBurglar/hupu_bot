@@ -20,5 +20,5 @@ champions = (
     | get_champion_map(df, "name_cn")
 )
 with open("champion_alias.json", "w", encoding="utf-8") as f:
-    j = json.dumps(champions, ensure_ascii=False)
+    j = json.dumps(champions, indent=4, ensure_ascii=False)
     f.write(j)

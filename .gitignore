@@ -2,4 +2,8 @@ __pycache__
 venv
 .vscode
 cookie.txt
-view.json
+floors.json
+data/lol/floors_archived.json
+data/lol/floors_latest.json
+data/lol/last_run_timestamp.txt
+data/lol/replies.json

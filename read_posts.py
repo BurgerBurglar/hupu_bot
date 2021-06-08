@@ -1,34 +1,36 @@
-from collections import OrderedDict
-from datetime import datetime, timedelta
 import json
 import re
-from typing import List, Optional, Dict, Tuple, Union
+from collections import OrderedDict
+from datetime import datetime, timedelta
+from multiprocessing.pool import Pool
+from typing import Dict, List, Optional, Tuple, Union
+
 import bs4
-from bs4 import BeautifulSoup
 import requests
-from fake_useragent import UserAgent
-from requests.sessions import session
-from urllib3.util.retry import Retry
+from bs4 import BeautifulSoup
+from fake_useragent import FakeUserAgent
 from pytz import timezone
-from multiprocessing import Pool
+from urllib3.util.retry import Retry
 
 
 class ReadPost:
     website_url = "http://bbs.hupu.com"
-    subs = {
-        # "lol": "3441",
-        # "5032": "5032",  # LOL游戏专区
+    sub_name_id_map = {
+        "lol": "3441",
+        "5032": "5032",  # LOL游戏专区
         "realmadrid": "2543",
     }
-    user_agent = UserAgent().random
+    user_agent = FakeUserAgent().random
 
     def __init__(
         self,
+        sub_name: str,
         queries: Optional[List[str]] = None,
         sub_pages_to_read: int = 10,
         n_posts: Optional[int] = None,
         time_ago: Optional[timedelta] = None,
     ) -> None:
+        self.sub_name = sub_name
         self.queries = queries
         self.n_posts = n_posts
         self.sub_pages_to_read = sub_pages_to_read
@@ -85,7 +87,7 @@ class ReadPost:
     def _filter_strings(self, input: str, *args) -> str:
         return re.sub(rf"({'|'.join(args)})", "", input)
 
-    def get_posts_from_sub_page(self, sub_page_url: str, sub: str) -> Dict:
+    def get_posts_from_sub_page(self, sub_page_url: str) -> Dict:
         response = self._try_catch_requests(sub_page_url)
         if response == -1:
             return []
@@ -131,8 +133,8 @@ class ReadPost:
                 pages = post.select_one("span.multipage")
                 n_pages = 1 if pages is None else int(pages.select("a")[-1].get_text())
                 posts[post_id] = {
-                    "sub": sub,
-                    "sub_id": self.subs[sub],
+                    "sub": self.sub_name,
+                    "sub_id": self.sub_name_id_map[self.sub_name],
                     "post_url": post_url,
                     "post_title": post_title,
                     "n_pages": n_pages,
@@ -141,22 +143,15 @@ class ReadPost:
         return posts
 
     def get_all_posts(self) -> Dict:
-        sub_urls = {sub: f"{self.website_url}/{sub}" for sub in self.subs.keys()}
-        sub_page_urls = {}
-        for sub, sub_url in sub_urls.items():
-            sub_page_urls[sub] = [
-                f"{sub_url}-{sub_page}"
-                for sub_page in range(1, self.sub_pages_to_read + 1)
-            ]
+        sub_url = f"{self.website_url}/{self.sub_name}"
+        sub_page_urls = [
+            f"{sub_url}-{sub_page}" for sub_page in range(1, self.sub_pages_to_read + 1)
+        ]
         posts = {}
-        for sub, sub_page_url_list in sub_page_urls.items():
-            pool = Pool(processes=20)
-            arg_list = [(sub_page_url, sub) for sub_page_url in sub_page_url_list]
-            posts_from_sub_page_list = pool.starmap(
-                self.get_posts_from_sub_page, arg_list
-            )
-            for posts_from_sub_page in posts_from_sub_page_list:
-                posts |= posts_from_sub_page
+        pool = Pool(processes=20)
+        posts_from_sub_page_list = pool.map(self.get_posts_from_sub_page, sub_page_urls)
+        for posts_from_sub_page in posts_from_sub_page_list:
+            posts |= posts_from_sub_page
         return posts
 
     def get_floors_for_page(self, page_url: str) -> Tuple[Union[Dict, bool]]:
@@ -220,6 +215,7 @@ class ReadPost:
                         "username": floor_username,
                         "content": floor_content_text,
                         "time": floor_time.isoformat(),
+                        "replied": False,
                     }
                 elif not add_floor_time:
                     break
@@ -228,7 +224,7 @@ class ReadPost:
 
     def get_floors_for_post(self, post_url: str, n_pages: int) -> Dict:
         floor_contents = {}
-        for page in range(n_pages, 1, -1):
+        for page in range(n_pages, 0, -1):
             page_url = post_url if page == 1 else post_url[:-5] + f"-{page}.html"
             floor_for_page, read_previous_page = self.get_floors_for_page(page_url)
             floor_contents |= floor_for_page
@@ -247,31 +243,57 @@ class ReadPost:
         ]
         pool = Pool(processes=20)
         floors_list = pool.starmap(self.get_floors_for_post, args)
-        post_details = {}
+        all_floors = {}
         for i in range(len(post_ids)):
             post_id = post_ids[i]
             floors = floors_list[i]
             if floors:
-                post_details[post_id] = {}
-                post_details[post_id]["meta"] = posts[post_id]
-                post_details[post_id]["floors"] = floors
-        return post_details
+                all_floors[post_id] = {}
+                all_floors[post_id]["meta"] = posts[post_id]
+                all_floors[post_id]["floors"] = floors
+        return OrderedDict(sorted(all_floors.items()))
+
+    def read_and_save(self):
+        result = self.get_all_floors()
+        try:
+            with open(f"data/{self.sub_name}/floors.json", encoding="utf-8") as f:
+                previous_result = json.loads(f.read())
+                if not previous_result:
+                    raise ValueError
+        except (FileNotFoundError, ValueError):
+            with open(f"data/{self.sub_name}/floors.json", "w", encoding="utf-8") as f:
+                f.write(json.dumps(result, indent=4, ensure_ascii=False))
+            with open(f"data/{self.sub_name}/floors.json", "w", encoding="utf-8") as f:
+                f.write(json.dumps(result, indent=4, ensure_ascii=False))
+        else:
+            new_result = previous_result.copy()
+            for post_id, post in previous_result.items():
+                if post_id in result:
+                    last_reply_time = result[post_id]["meta"]["last_reply_time"]
+                    new_result[post_id]["meta"]["last_reply_time"] = last_reply_time
+                    new_result[post_id]["floors"] = (
+                        result[post_id]["floors"] | post["floors"]
+                    )
+            with open(f"data/{self.sub_name}/floors.json", "w", encoding="utf-8") as f:
+                f.write(json.dumps(new_result, indent=4, ensure_ascii=False))
+            with open(f"data/{self.sub_name}/floors.json", "w", encoding="utf-8") as f:
+                f.write(json.dumps(result, indent=4, ensure_ascii=False))
+
+
+def read_posts(sub_name, sub_pages_to_read, time_ago):
+    with open(f"data/{sub_name}/input/keyword_reply.json", encoding="utf-8") as f:
+        queries = json.loads(f.read()).keys()
+    start_time = datetime.now()
+    read_post = ReadPost(
+        sub_name=sub_name,
+        queries=[*queries],
+        sub_pages_to_read=sub_pages_to_read,
+        time_ago=time_ago,
+    )
+    result = read_post.read_and_save()
+    print("Time:", datetime.now() - start_time)
+    return result
 
 
 if __name__ == "__main__":
-    with open("champion_alias.json", encoding="utf-8") as f:
-        j = f.read()
-        champions = json.loads(j)
-
-    start_time = datetime.now()
-    read_post = ReadPost(
-        queries=[*champions.keys()],
-        # n_posts=10,
-        time_ago=timedelta(hours=1),
-    )
-    result = read_post.get_all_floors()
-    print(result)
-    print("Time:", datetime.now() - start_time)
-
-    with open("view.json", "w", encoding="utf-8") as f:
-        f.write(json.dumps(result, ensure_ascii=False))
+    result = read_posts("lol", 5, timedelta(hours=12))
