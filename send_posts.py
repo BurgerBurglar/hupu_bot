@@ -1,21 +1,24 @@
 import asyncio
 import json
 from random import choice
+from sys import argv
 from typing import List
 from urllib.parse import quote
 
 import requests
+import urllib3
 from fake_useragent import UserAgent
 
 from exceptions import AccountBannedException, PostsDeletedException
+
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 
 class SendPost:
     post_url = "https://bbs.hupu.com/post.php?action=reply"
     user_agent = UserAgent().random
     session = requests.Session()
-    signature = "本回复由虎扑非官方机器人自动发送。如果你对这个回复有什么问题或建议，请回复或私信。"
-    do_not_reply_users = ["用户0234988604"]
+    signature = '本回复由<a href="https://bbs.hupu.com/43452253.html">虎扑非官方机器人</a>自动发送。如果你对这个回复有什么问题或建议，请回复或私信。'
 
     def __init__(self, sub_name: str, queries: List[str], reply_type: str):
         self.sub_name = sub_name
@@ -25,11 +28,13 @@ class SendPost:
         self.headers = self._get_headers()
         self.deleted_post_ids = []
         self.banned_sub_ids = []
-        self.all_sent_replies = []
+        self.do_not_reply_users = self.get_do_not_reply_users()
+        self.previously_replied_floors = self.get_previously_replied_floors()
+        self.recently_replied_floors = []
 
     @staticmethod
     def _get_cookie():
-        with open("cookie.txt") as f:
+        with open("cookie.txt", "r", encoding="utf-8") as f:
             return f.read()
 
     def _get_headers(self):
@@ -37,7 +42,21 @@ class SendPost:
             "content-type": "application/x-www-form-urlencoded",
             "user-agent": self.user_agent,
             "cookie": self.cookie,
+            "charset": "utf-8",
         }
+
+    def get_do_not_reply_users(self):
+        with open("data/global/do_not_reply.json", encoding="utf-8") as f:
+            return json.loads(f.read())["users"]
+
+    def get_previously_replied_floors(self):
+        try:
+            with open(
+                f"data/{self.sub_name}/replied_floors.json", encoding="utf-8"
+            ) as f:
+                return json.loads(f.read())
+        except (FileNotFoundError, ValueError):
+            return []
 
     def get_stats_for_pairs(self, a, b):
         with open(f"data/{self.sub_name}/stats.json", encoding="utf-8") as f:
@@ -92,14 +111,24 @@ class SendPost:
             result = "keyword not found"
         return result
 
+    def get_licking_dog_reply_content(self, query: str) -> str:
+        try:
+            return self.session.get(
+                "https://api.ixiaowai.cn/tgrj/index.php", verify=False
+            ).text
+        except requests.exceptions.RequestException:
+            return "机器人出问题了，再试试吧？"
+
     def _get_reply_content(self, reply_type, **kw):
         reply_type_function_map = {
             "keyword": self.get_keyword_reply_content,
             "comparison": self.get_comparison_reply_content,
+            "licking_dog": self.get_licking_dog_reply_content,
         }
         reply_type_args_map = {
             "keyword": ["query"],
             "comparison": ["query", "quote_content"],
+            "licking_dog": ["query"],
         }
         reply_type_function = reply_type_function_map[reply_type]
         reply_type_kwargs: List = {
@@ -115,8 +144,12 @@ class SendPost:
             sub_id = post["meta"]["sub_id"]
             floors = post["floors"]
             for floor in floors.values():
-                if floor["username"] in self.do_not_reply_users or floor["replied"]:
-                    break
+                if (
+                    floor["username"] in self.do_not_reply_users
+                    or {"post_id": post_id, "floor_id": floor["floor_id"]}
+                    in self.previously_replied_floors
+                ):
+                    continue
                 floor_id = floor["floor_id"]
                 quote_content = floor["content"]
                 for query in queries:
@@ -143,32 +176,13 @@ class SendPost:
         return replies
 
     def mark_replied_floors(self):
-        replies = self.all_sent_replies
-        replied_floors = [
-            {
-                "replied_post_id": reply["post_id"],
-                "replied_floor_id": reply["quote_floor_id"],
-            }
-            for reply in replies
-        ]
-        with open(f"data/{self.sub_name}/floors.json", "r", encoding="utf-8") as f:
-            floors_to_reply: list[dict] = json.loads(f.read())
-        updated_floors = {}
-        for post_id, post in floors_to_reply.items():
-            updated_floors[post_id] = {}
-            updated_floors[post_id]["meta"] = post["meta"]
-            updated_floors[post_id]["floors"] = {}
-            for floor_number, floor in post["floors"].items():
-                floor_id = floor["floor_id"]
-                if {
-                    "replied_post_id": post_id,
-                    "replied_floor_id": floor_id,
-                } in replied_floors:
-                    floor["replied"] = True
-                updated_floors[post_id]["floors"][floor_number] = floor
-        with open(f"data/{self.sub_name}/floors.json", "w", encoding="utf-8") as f:
-            f.write(json.dumps(updated_floors, indent=4, ensure_ascii=False))
-        return updated_floors
+        with open(
+            f"data/{self.sub_name}/replied_floors.json", "w", encoding="utf-8"
+        ) as f:
+            replied_floors = (
+                self.previously_replied_floors + self.recently_replied_floors
+            )
+            f.write(json.dumps(replied_floors, indent=4, ensure_ascii=False))
 
     def test_account_banned(self, sub_id, post_id):
         response = requests.get(
@@ -190,10 +204,11 @@ class SendPost:
             if "页面不存在" in response.text:
                 raise PostsDeletedException()
             if "出错" in response.text:
+                # doesn't actually post something
                 self.test_account_banned(sub_id=payload["fid"], post_id=payload["tid"])
                 raise requests.exceptions.HTTPError("嗯，出错了。")
             response.raise_for_status()
-        except requests.exceptions.HTTPError as e:
+        except (requests.exceptions.HTTPError, requests.exceptions.ReadTimeout) as e:
             print(e)
             await asyncio.sleep(3)
             if times < 3:
@@ -204,10 +219,12 @@ class SendPost:
                 return -1
         else:
             print("Success!")
-            self.all_sent_replies += {
-                "replied_post_id": payload["tid"],
-                "replied_floor_id": payload["quotepid"],
-            }
+            self.recently_replied_floors.append(
+                {
+                    "post_id": payload["tid"],
+                    "floor_id": payload["quotepid"],
+                }
+            )
             return response
 
     async def send_reply(self, metadata):
@@ -218,7 +235,7 @@ class SendPost:
         quote_floor_id = metadata["quote_floor_id"]
         content = metadata["content"]
         payload = {
-            "atc_content": quote(self.format_newlines(content)),
+            "atc_content": self.format_newlines(content),
             "step": 2,
             "action": "reply",
             "fid": sub_id,
@@ -238,23 +255,32 @@ class SendPost:
             print("Banned:", sub_id)
             self.banned_sub_ids.append(sub_id)
 
-    async def send_all_replies(self):
+    async def send_all_replies(self, debug=False):
         replies = self.get_all_replies()
-        self.mark_replied_floors()
-        tasks = []
-        for reply in replies:
-            tasks.append(asyncio.create_task(self.send_reply(reply)))
-        for task in tasks:
-            await task
+        if not debug:
+            tasks = []
+            for reply in replies:
+                tasks.append(asyncio.create_task(self.send_reply(reply)))
+            for task in tasks:
+                await task
+            self.mark_replied_floors()
 
 
-async def send_posts(sub_name, reply_type):
-    with open(f"data/{sub_name}/input/keyword_reply.json", encoding="utf-8") as f:
-        queries = json.loads(f.read()).keys()
+async def send_posts(sub_name, reply_type, debug):
+    if reply_type == "keyword":
+        with open(f"data/{sub_name}/input/keyword_reply.json", encoding="utf-8") as f:
+            queries = json.loads(f.read()).keys()
+    elif reply_type == "licking_dog":
+        queries = ["#舔狗日记#"]
     send_post = SendPost(sub_name, queries=queries, reply_type=reply_type)
-    task = asyncio.create_task(send_post.send_all_replies())
+    send_post.get_all_replies()
+    task = asyncio.create_task(send_post.send_all_replies(debug))
     await task
 
 
 if __name__ == "__main__":
-    asyncio.run(send_posts("lol", reply_type="keyword"))
+    if len(argv) == 1:
+        sub_name = "realmadrid"
+    else:
+        sub_name = argv[1]
+    asyncio.run(send_posts(sub_name, reply_type="licking_dog"), debug=True)

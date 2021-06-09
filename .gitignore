@@ -3,7 +3,7 @@ venv
 .vscode
 cookie.txt
 floors.json
-data/lol/floors_archived.json
-data/lol/floors_latest.json
-data/lol/last_run_timestamp.txt
-data/lol/replies.json
+last_run_timestamp.txt
+replies.json
+replied_floors.json
+cookie_bot.txt

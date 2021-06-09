@@ -4,6 +4,7 @@ from collections import OrderedDict
 from datetime import datetime, timedelta
 from multiprocessing.pool import Pool
 from typing import Dict, List, Optional, Tuple, Union
+from sys import argv
 
 import bs4
 import requests
@@ -19,6 +20,7 @@ class ReadPost:
         "lol": "3441",
         "5032": "5032",  # LOL游戏专区
         "realmadrid": "2543",
+        "bxj": "34",
     }
     user_agent = FakeUserAgent().random
 
@@ -27,12 +29,10 @@ class ReadPost:
         sub_name: str,
         queries: Optional[List[str]] = None,
         sub_pages_to_read: int = 10,
-        n_posts: Optional[int] = None,
         time_ago: Optional[timedelta] = None,
     ) -> None:
         self.sub_name = sub_name
         self.queries = queries
-        self.n_posts = n_posts
         self.sub_pages_to_read = sub_pages_to_read
         if time_ago is None:
             self.min_time = None
@@ -215,7 +215,6 @@ class ReadPost:
                         "username": floor_username,
                         "content": floor_content_text,
                         "time": floor_time.isoformat(),
-                        "replied": False,
                     }
                 elif not add_floor_time:
                     break
@@ -234,8 +233,6 @@ class ReadPost:
 
     def get_all_floors(self) -> Dict:
         posts = self.get_all_posts()
-        if self.n_posts is not None:
-            posts = {k: posts[k] for k in list(posts)[: self.n_posts]}
         post_ids = list(posts.keys())
         args = [
             (posts[post_id]["post_url"], posts[post_id]["n_pages"])
@@ -255,38 +252,21 @@ class ReadPost:
 
     def read_and_save(self):
         result = self.get_all_floors()
-        try:
-            with open(f"data/{self.sub_name}/floors.json", encoding="utf-8") as f:
-                previous_result = json.loads(f.read())
-                if not previous_result:
-                    raise ValueError
-        except (FileNotFoundError, ValueError):
-            with open(f"data/{self.sub_name}/floors.json", "w", encoding="utf-8") as f:
-                f.write(json.dumps(result, indent=4, ensure_ascii=False))
-            with open(f"data/{self.sub_name}/floors.json", "w", encoding="utf-8") as f:
-                f.write(json.dumps(result, indent=4, ensure_ascii=False))
-        else:
-            new_result = previous_result.copy()
-            for post_id, post in previous_result.items():
-                if post_id in result:
-                    last_reply_time = result[post_id]["meta"]["last_reply_time"]
-                    new_result[post_id]["meta"]["last_reply_time"] = last_reply_time
-                    new_result[post_id]["floors"] = (
-                        result[post_id]["floors"] | post["floors"]
-                    )
-            with open(f"data/{self.sub_name}/floors.json", "w", encoding="utf-8") as f:
-                f.write(json.dumps(new_result, indent=4, ensure_ascii=False))
-            with open(f"data/{self.sub_name}/floors.json", "w", encoding="utf-8") as f:
-                f.write(json.dumps(result, indent=4, ensure_ascii=False))
+        with open(f"data/{self.sub_name}/floors.json", "w", encoding="utf-8") as f:
+            f.write(json.dumps(result, indent=4, ensure_ascii=False))
 
 
-def read_posts(sub_name, sub_pages_to_read, time_ago):
-    with open(f"data/{sub_name}/input/keyword_reply.json", encoding="utf-8") as f:
-        queries = json.loads(f.read()).keys()
+def read_posts(sub_name, sub_pages_to_read, time_ago, reply_type="keyword"):
+    if reply_type == "keyword":
+        with open(f"data/{sub_name}/input/keyword_reply.json", encoding="utf-8") as f:
+            queries = json.loads(f.read()).keys()
+            queries = [*queries]
+    elif reply_type == "licking_dog":
+        queries = ["#舔狗日记#"]
     start_time = datetime.now()
     read_post = ReadPost(
         sub_name=sub_name,
-        queries=[*queries],
+        queries=queries,
         sub_pages_to_read=sub_pages_to_read,
         time_ago=time_ago,
     )
@@ -296,4 +276,13 @@ def read_posts(sub_name, sub_pages_to_read, time_ago):
 
 
 if __name__ == "__main__":
-    result = read_posts("lol", 5, timedelta(hours=12))
+    if len(argv) == 1:
+        sub_name = "realmadrid"
+    else:
+        sub_name = argv[1]
+    result = read_posts(
+        sub_name=sub_name,
+        sub_pages_to_read=5,
+        time_ago=timedelta(hours=12),
+        reply_type="licking_dog",
+    )

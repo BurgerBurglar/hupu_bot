@@ -1,7 +1,8 @@
+from sys import argv
 import pandas as pd
 import json
 
-sub_name = "lol"
+sub_name = argv[1]
 
 dtypes = {"keyword": str, "aliases": str, "replies": str}
 df = pd.read_csv(f"data/{sub_name}/input/keyword_reply.csv", dtype=dtypes)
