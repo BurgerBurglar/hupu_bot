@@ -2,6 +2,7 @@ import json
 import re
 from collections import OrderedDict
 from datetime import datetime, timedelta
+import logging
 from multiprocessing.pool import Pool
 from typing import Dict, List, Optional, Tuple, Union
 from sys import argv
@@ -75,13 +76,12 @@ class ReadPost:
             )
             return response
         except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
-            print(e)
-            print(url)
+            logging.info(e)
+            logging.info(url)
             return -1
         except Exception as e:
-            print("UNCAUGHT ERROR!!!")
-            print(e)
-            print(url)
+            logging.error(e)
+            logging.error(e)
             return -1
 
     def _filter_strings(self, input: str, *args) -> str:
@@ -277,7 +277,7 @@ def read_posts(sub_name, sub_pages_to_read, time_ago, reply_type="keyword"):
 
 if __name__ == "__main__":
     if len(argv) == 1:
-        sub_name = "realmadrid"
+        sub_name = "bxj"
     else:
         sub_name = argv[1]
     result = read_posts(

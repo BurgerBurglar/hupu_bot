@@ -1,9 +1,9 @@
 import asyncio
 import json
+import logging
 from random import choice
 from sys import argv
 from typing import List
-from urllib.parse import quote
 
 import requests
 import urllib3
@@ -51,9 +51,7 @@ class SendPost:
 
     def get_previously_replied_floors(self):
         try:
-            with open(
-                f"data/{self.sub_name}/replied_floors.json", encoding="utf-8"
-            ) as f:
+            with open(f"data/global/replied_floors.json", encoding="utf-8") as f:
                 return json.loads(f.read())
         except (FileNotFoundError, ValueError):
             return []
@@ -176,12 +174,12 @@ class SendPost:
         return replies
 
     def mark_replied_floors(self):
-        with open(
-            f"data/{self.sub_name}/replied_floors.json", "w", encoding="utf-8"
-        ) as f:
-            replied_floors = (
-                self.previously_replied_floors + self.recently_replied_floors
-            )
+        with open(f"data/global/replied_floors.json", "w", encoding="utf-8") as f:
+            replied_floors = self.previously_replied_floors + [
+                floor
+                for floor in self.recently_replied_floors
+                if floor not in self.previously_replied_floors
+            ]
             f.write(json.dumps(replied_floors, indent=4, ensure_ascii=False))
 
     def test_account_banned(self, sub_id, post_id):
@@ -209,7 +207,7 @@ class SendPost:
                 raise requests.exceptions.HTTPError("嗯，出错了。")
             response.raise_for_status()
         except (requests.exceptions.HTTPError, requests.exceptions.ReadTimeout) as e:
-            print(e)
+            logging.info(e)
             await asyncio.sleep(3)
             if times < 3:
                 return asyncio.create_task(
@@ -218,13 +216,13 @@ class SendPost:
             else:
                 return -1
         else:
-            print("Success!")
-            self.recently_replied_floors.append(
-                {
-                    "post_id": payload["tid"],
-                    "floor_id": payload["quotepid"],
-                }
-            )
+            replied_floor = {
+                "post_id": payload["tid"],
+                "floor_id": payload["quotepid"],
+            }
+            print(f"Success! {replied_floor}")
+            logging.info(f"Success! {replied_floor}")
+            self.recently_replied_floors.append(replied_floor)
             return response
 
     async def send_reply(self, metadata):
@@ -245,14 +243,13 @@ class SendPost:
         if quote_floor_id != "tpc":  # it's not OP who sent it.
             payload["quotepid"] = quote_floor_id
 
-        print(post_id, quote_floor_id, end=" ")
         try:
             return await self.try_replying(self.post_url, self.headers, payload)
         except PostsDeletedException:
-            print("Deleted:", post_id)
+            logging.error(f"Deleted:{post_id}")
             self.deleted_post_ids.append(post_id)
         except AccountBannedException:
-            print("Banned:", sub_id)
+            logging.error(f"Banned:{sub_id}")
             self.banned_sub_ids.append(sub_id)
 
     async def send_all_replies(self, debug=False):
@@ -280,7 +277,7 @@ async def send_posts(sub_name, reply_type, debug):
 
 if __name__ == "__main__":
     if len(argv) == 1:
-        sub_name = "realmadrid"
+        sub_name = "bxj"
     else:
         sub_name = argv[1]
-    asyncio.run(send_posts(sub_name, reply_type="licking_dog"), debug=True)
+    asyncio.run(send_posts(sub_name, reply_type="licking_dog", debug=True))
