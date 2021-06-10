@@ -9,7 +9,7 @@ import requests
 import urllib3
 from fake_useragent import UserAgent
 
-from exceptions import AccountBannedException, PostsDeletedException
+from exceptions import AccountBannedException, PostDeletedException
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -200,7 +200,7 @@ class SendPost:
                 timeout=10,
             )
             if "页面不存在" in response.text:
-                raise PostsDeletedException()
+                raise PostDeletedException()
             if "出错" in response.text:
                 # doesn't actually post something
                 self.test_account_banned(sub_id=payload["fid"], post_id=payload["tid"])
@@ -245,7 +245,7 @@ class SendPost:
 
         try:
             return await self.try_replying(self.post_url, self.headers, payload)
-        except PostsDeletedException:
+        except PostDeletedException:
             logging.error(f"Deleted:{post_id}")
             self.deleted_post_ids.append(post_id)
         except AccountBannedException:

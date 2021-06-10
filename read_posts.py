@@ -14,6 +14,8 @@ from fake_useragent import FakeUserAgent
 from pytz import timezone
 from urllib3.util.retry import Retry
 
+from exceptions import PageCountNotMatchException, PostDeletedException
+
 
 class ReadPost:
     website_url = "http://bbs.hupu.com"
@@ -154,11 +156,19 @@ class ReadPost:
             posts |= posts_from_sub_page
         return posts
 
-    def get_floors_for_page(self, page_url: str) -> Tuple[Union[Dict, bool]]:
+    def get_floors_for_page(
+        self, page_url: str, n_pages: int
+    ) -> Tuple[Union[Dict, bool]]:
         response = self._try_catch_requests(page_url)
         if response == -1:
             return [], True
         html_text = response.text
+        try:
+            page_count = int(re.findall(r"(?<=\bpageCount:)(\d+)", html_text)[0])
+        except IndexError:
+            raise PostDeletedException
+        if page_count != n_pages:
+            raise PageCountNotMatchException(page_count)
 
         floor_contents = {}
         soup = BeautifulSoup(html_text.replace("&nbsp;", " "), "html.parser")
@@ -223,12 +233,19 @@ class ReadPost:
 
     def get_floors_for_post(self, post_url: str, n_pages: int) -> Dict:
         floor_contents = {}
-        for page in range(n_pages, 0, -1):
-            page_url = post_url if page == 1 else post_url[:-5] + f"-{page}.html"
-            floor_for_page, read_previous_page = self.get_floors_for_page(page_url)
-            floor_contents |= floor_for_page
-            if not read_previous_page:
-                break
+        try:
+            for page in range(n_pages, 0, -1):
+                page_url = post_url if page == 1 else post_url[:-5] + f"-{page}.html"
+                floor_for_page, read_previous_page = self.get_floors_for_page(
+                    page_url, n_pages
+                )
+                floor_contents |= floor_for_page
+                if not read_previous_page:
+                    break
+        except PageCountNotMatchException as e:
+            return self.get_floors_for_post(post_url, e.page_count)
+        except PostDeletedException:
+            return {}
         return OrderedDict(sorted(floor_contents.items()))
 
     def get_all_floors(self) -> Dict:
@@ -239,6 +256,8 @@ class ReadPost:
             for post_id in post_ids
         ]
         pool = Pool(processes=20)
+        # syncronous, for debug only.
+        # floors_list = [self.get_floors_for_post(*arg) for arg in args]
         floors_list = pool.starmap(self.get_floors_for_post, args)
         all_floors = {}
         for i in range(len(post_ids)):
